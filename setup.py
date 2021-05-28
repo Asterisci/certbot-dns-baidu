@@ -4,7 +4,7 @@ from setuptools import setup
 from setuptools import find_packages
 
 
-version = '0.1.0'
+version = '0.1.1'
 
 # Remember to update local-oldest-requirements.txt when changing the minimum
 # acme/certbot version.
@@ -17,10 +17,19 @@ install_requires = [
     'zope.interface',
 ]
 
+# read the contents of your README file
+from os import path
+
+this_directory = path.abspath(path.dirname(__file__))
+with open(path.join(this_directory, "README.md")) as f:
+    long_description = f.read()
+
 setup(
     name='certbot-dns-baidu',
     version=version,
     description="Baidu DNS Authenticator plugin for Certbot",
+    long_description=long_description,
+    long_description_content_type="text/markdown",
     url='https://github.com/chaoers/certbot-dns-baidu',
     author="Asterisk",
     author_email='fanguofan@asteriscum.cn',

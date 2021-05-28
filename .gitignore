@@ -1,3 +1,4 @@
 .certbot_test_workspace/
 certbot_dns_baidu.egg-info/
 certbot_dns_baidu/__pycache__/
+dist/
