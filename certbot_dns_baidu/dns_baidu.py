@@ -1,23 +1,24 @@
 """DNS Authenticator for BaiduCdn."""
+import hmac
 import json
 import logging
 import time
-import base64
-from hashlib import sha1
-import hmac
+import urllib.parse
 
 import requests
 import zope.interface
+
+from http import HTTPStatus
+from hashlib import sha256
 
 from certbot import errors
 from certbot import interfaces
 from certbot.plugins import dns_common
 from certbot.plugins import dns_common_lexicon
 
-
 logger = logging.getLogger(__name__)
 
-API_ENDPOINT = "https://api.su.baidu.com/%s"
+API_ENDPOINT = "https://bcd.baidubce.com"
 
 @zope.interface.implementer(interfaces.IAuthenticator)
 @zope.interface.provider(interfaces.IPluginFactory)
@@ -89,102 +90,114 @@ class _BaiduCdnClient(dns_common_lexicon.LexiconClient):
     _secret_key = ''
     _ttl = 300
 
-    _sign_method = "HMAC-SHA1"
-
     def __init__(self, access_key, secret_key, ttl = 300):
         logger.debug("getting access-key:{} and secret-key: {}".format(access_key, secret_key))
         self._access_key = access_key
         self._secret_key = secret_key
         self._ttl = ttl
-            
-    def get_signature(self, sec_key, text):
-        logger.debug("sec_key:{} and text: {}".format(sec_key, text))
-        hmac_code = hmac.new(sec_key.encode(), text.encode(), sha1).digest()
-        return base64.b64encode(hmac_code).decode()
-    
-    def get_inited_common_params(self, path):
-        param_map = {}
 
-        auth_timestamp = str(int(time.time()))
-        param_map['X-Auth-Access-Key'] = self._access_key
-        param_map['X-Auth-Nonce'] = auth_timestamp
-        param_map['X-Auth-Path-Info'] = path
-        param_map['X-Auth-Signature-Method'] = self._sign_method
-        param_map['X-Auth-Timestamp'] = auth_timestamp
+    def _identify_base_domain(self, domain):
+        candidates = dns_common.base_domain_name_guesses(domain)
+        uri = "/v1/domain/detail"
+        method="GET"
+        for candidate in candidates:
+            queries = {
+                "domain": candidate
+            }
+            resp = self.send_api_request(method=method, uri=uri, queries=queries)
+            if resp.status_code == HTTPStatus.OK:
+                return candidate
+        raise errors.PluginError(f"Unable to identify base domain for {domain}, tried {candidates}")
 
-        return param_map
+    def _find_domain_record_ids(self, domain, rr, value):
+        uri = "/v1/domain/resolve/list"
+        method = "POST"
+        payloads = {
+            "domain": domain
+        }
+        resp = self.send_api_request(method=method, uri=uri, payloads=payloads)
+        if resp.status_code != HTTPStatus.OK:
+            raise errors.PluginError(f"Unable to get domain resolve lists for {domain}")
+        resolves = resp.json()["result"]
+        for resolve in resolves:
+            if rr == resolve['domain'] and value == resolve['rdata']:
+                return resolve['recordId']
+        raise errors.PluginError(f"Unable to get record id for domain {domain}")
 
-    def smart_str(self, target_string):
-        if isinstance(target_string, str):
-            return target_string
-        else:
-            return json.dumps(target_string)
-    
-    def get_parsed_all_params(self, params):
-        keys = sorted(params.keys())
-        return "&".join(["%s=%s" % (str(k), self.smart_str(params[k])) for k in keys])
+    def get_request_header(self, method, uri, queries):
+        x_bce_date = time.gmtime()
+        x_bce_date = time.strftime('%Y-%m-%dT%H:%M:%SZ', x_bce_date)
+        headers = {
+            "Host": "bcd.baidubce.com",
+            "content-type": "application/json;charset=utf-8",
+            "x-bce-date": x_bce_date
+        }
 
-    def get_request_header(self, path, query_params, body_params):
-        common_params = self.get_inited_common_params(path)
-        all_params = {}
-        headers = {}
+        authStringPrefix = f"bce-auth-v1/{self._access_key}/{x_bce_date}/1800"
+        
+        CanonicalURI = urllib.parse.quote(uri)
 
-        headers.update(common_params)
+        CanonicalQueryGroups = []
+        for key, value in queries.items():
+            query_processed = f"{urllib.parse.quote(key, safe='')}={urllib.parse.quote(value, safe='')}"
+            CanonicalQueryGroups.append(query_processed)
+        CanonicalQueryGroups.sort()
+        CanonicalQueryString = "&".join(CanonicalQueryGroups)
 
-        all_params.update(common_params)
-        all_params.update(query_params)
-        all_params.update(body_params)
+        CanonicalHeaderGroups = []
+        for key, value in headers.items():
+            headerProcessed = f"{urllib.parse.quote(key.lower(), safe='')}:{urllib.parse.quote(value, safe='')}"
+            CanonicalHeaderGroups.append(headerProcessed)
+        CanonicalHeaderGroups.sort()
+        CanonicalHeaderString = "\n".join(CanonicalHeaderGroups)
+        
+        CanonicalRequest = f"{method}\n{CanonicalURI}\n{CanonicalQueryString}\n{CanonicalHeaderString}"
+        
+        signingKey = hmac.new(self._secret_key.encode('utf-8'), 
+                     authStringPrefix.encode('utf-8'), sha256)
+        signature = hmac.new(signingKey.hexdigest().encode('utf-8'),
+                     CanonicalRequest.encode('utf-8'), sha256)
 
-        all_params_str = self.get_parsed_all_params(all_params)
-
-        sign = self.get_signature(self._secret_key, all_params_str)
-
-        headers["X-Auth-Sign"] = sign
+        signedHeaders = "content-type;host;x-bce-date"
+        headers["Authorization"] = f"{authStringPrefix}/{signedHeaders}/{signature.hexdigest()}"
 
         return headers
 
-    def send_http_request(self, method='GET', url='', params=None, payload=None, headers=None):
-        if params is None:
-            params = {}
-        if payload is None:
-            payload = {}
-        if headers is None:
-            headers = {}
-            
-        resp = requests.request(method, url, params=params, data=json.dumps(payload), headers=headers)
+    def send_api_request(self, method, uri, queries={}, payloads={}):
+        url = f"{API_ENDPOINT}{uri}"
+        headers = self.get_request_header(method=method, uri=uri, queries=queries)
+        resp = requests.request(method, url, params=queries, data=json.dumps(payloads), headers=headers)
         return resp
 
     def add_txt_record(self, domain, record_name, value):
-        path = "v3/yjs/zones/dns_records"
-        params = {}
+        uri = "/v1/domain/resolve/add"
+        method = "POST"
 
-        payload = {}
-        payload['domain'] = domain
-        payload['subdomain'] = record_name[:record_name.rindex('.' + domain)]
-        payload['type'] = 'TXT'
-        payload['content'] = value
-        payload['ttl'] = self._ttl
+        domain = self._identify_base_domain(domain=domain)
+        rr = record_name[:record_name.rindex(f".{domain}")]
 
-        headers = self.get_request_header(path, params, payload)
+        queries = {}
+        payloads = {
+            "domain": rr,
+            "rdType": "TXT",
+            "rdata": value,
+            "zoneName": domain,
+            "ttl": self._ttl
+        }
 
-        url = API_ENDPOINT % path
-        
-        res = self.send_http_request("POST", url, params=params, payload=payload, headers=headers)
-        logger.debug("getting result {}".format(res.json()))
+        self.send_api_request(method=method, uri=uri, queries=queries, payloads=payloads)
 
     def del_txt_record(self, domain, record_name, value):
-        path = "v3/yjs/zones/dns_records"
-        params = {}
+        uri = "/v1/domain/resolve/delete"
+        method = "POST"
         
-        payload = {}
-        payload['domain'] = domain
-        payload['subdomain'] = record_name[:record_name.rindex('.' + domain)]
-        payload['content'] = value
-        payload['isp_uuid'] = 'default'
+        domain = self._identify_base_domain(domain=domain)
+        rr = record_name[:record_name.rindex(f".{domain}")]
+        record_id = self._find_domain_record_ids(domain=domain, rr=rr, value=value)
 
-        headers = self.get_request_header(path, params, payload)
-
-        url = API_ENDPOINT % path
-
-        res = self.send_http_request("DELETE", url, params=params, payload=payload, headers=headers)
-        logger.debug("getting result {}".format(res.json()))
+        queries = {}
+        payloads = {
+            "zoneName": domain,
+            "recordId": record_id
+        }
+        self.send_api_request(method=method, uri=uri, queries=queries, payloads=payloads)

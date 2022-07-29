@@ -4,7 +4,7 @@ from setuptools import setup
 from setuptools import find_packages
 
 
-version = '0.1.1'
+version = '0.2.0'
 
 # Remember to update local-oldest-requirements.txt when changing the minimum
 # acme/certbot version.
@@ -30,7 +30,7 @@ setup(
     description="Baidu DNS Authenticator plugin for Certbot",
     long_description=long_description,
     long_description_content_type="text/markdown",
-    url='https://github.com/chaoers/certbot-dns-baidu',
+    url='https://github.com/Xavier4m/certbot-dns-baidu',
     author="Asterisk",
     author_email='fanguofan@asteriscum.cn',
     license='GNU General Public License v3.0',
